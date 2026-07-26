@@ -1,13 +1,12 @@
 # qishui-api
 
-汽水音乐 Node.js API 服务，整合 `D:\Android\AndroidStudioProjects\ai\qishui` 中已有项目、APK 静态逆向结果和已动态验证的 Luna 接口。
+汽水音乐 Node.js API 服务
 
 ## 使用声明
 
 - 本项目仅供个人学习交流使用。
 - 下载、解密和解析能力只用于处理你已获得合法授权的内容。
 - 商用、传播、批量抓取、版权规避等风险由使用者自己承担。
-- 项目不会内置 Cookie、`sessionid`、`spade_a`、`PlayAuth`、签名 header 或其他真实敏感值。
 
 ## 功能状态
 
