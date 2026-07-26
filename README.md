@@ -136,7 +136,6 @@ curl -X POST "http://127.0.0.1:3300/audio/decrypt" \
 
 ## 登录态与敏感信息
 
-- 项目不内置 `Cookie`、`sessionid`、`X-Helios`、`X-Medusa`、`PlayAuth`、`spade_a`。
 - `/auth/qrcode` 与 `/auth/qrcode/status` 只处理当前扫码流程，不持久化账号状态。
 - `/auth/qrcode` 会把上游 `data.token`、`data.qrcode`、`data.qrcode_index_url` 扁平输出为 `token`、`qrcode`、`qrcode_index_url`，调用方应展示 `qrcode` 并用 `token` 轮询。
 - 当前上游二维码文案要求使用已登录的「抖音 APP」扫码验证；使用汽水音乐 App 扫码可能不会完成确认。
@@ -150,7 +149,6 @@ curl -X POST "http://127.0.0.1:3300/audio/decrypt" \
 - 下载/解密默认限制单文件大小为 `QISHUI_DOWNLOAD_MAX_BYTES=52428800`。
 - POST JSON 请求还受 Express `1mb` body 限制；如需处理大文件，优先传入受控 `audio_url`，不要直接提交大体积 base64。
 - 如需关闭本地解密接口，可设置 `QISHUI_ENABLE_DECRYPT=false`。
-- 导出日志或抓包结果前必须脱敏 `Cookie`、`sessionid`、`device_id`、`install_id`、`spade_a`、`PlayAuth`、手机号和用户 ID。
 
 ## 验证命令
 
