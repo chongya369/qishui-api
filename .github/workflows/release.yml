@@ -81,9 +81,17 @@ jobs:
       - name: Build binary
         shell: bash
         run: |
+          # 注意：不能用 `pkg . --config xxx.json`。
+          # pkg 源码 lib-es5/config.js:561 明确规定：只要输入是带 package.json 的项目，
+          # 就不能再指定 --config，直接抛
+          #   "Specify either 'package.json' or config. Not both"
+          # （官方文档里「--config 优先级最高」的表述在这一点上是有误导性的）
+          # 唯一可用路径：把配置落到项目根的 .pkgrc 走自动发现。
+          # 这里在 CI 的临时工作区生成，仓库中不保留该文件。
+          cp .github/qishui-pkg.config.json .pkgrc
+
           mkdir -p dist
           pkg . \
-            --config .github/qishui-pkg.config.json \
             -t "${{ matrix.target }}" \
             -o "dist/${{ matrix.out }}" \
             --debug 2>&1 | tee pkg-build.log
@@ -91,11 +99,18 @@ jobs:
           test -f "dist/${{ matrix.out }}" || { echo "::error::构建产物 dist/${{ matrix.out }} 缺失"; exit 1; }
           ls -lh dist
 
-          # 构建期自查：module/ 目录必须被收进 snapshot，否则运行期 34 个端点全部不注册
+          # 硬性自查：配置必须真的被加载。
+          # 漏加载不会报错，但 module/ 不进 snapshot ⇒ 34 个端点全部静默不注册。
+          if ! grep -q "Using config .pkgrc" pkg-build.log; then
+            echo "::error::pkg 未加载 .pkgrc 配置，module/ 不会进入 snapshot"
+            exit 1
+          fi
+          echo "OK: 已确认加载 .pkgrc"
+
           if grep -q "module/" pkg-build.log; then
             echo "OK: 构建日志中已出现 module/ 收录记录"
           else
-            echo "::warning::构建日志未出现 module/ 收录记录，请检查配置是否生效"
+            echo "::warning::构建日志未出现 module/ 收录记录，请核对配置"
           fi
 
       # ---- 冒烟验收：直接跑二进制，用路由数作为唯一有效判据 ----
