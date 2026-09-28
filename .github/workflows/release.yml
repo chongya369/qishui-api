@@ -1,0 +1,293 @@
+name: Release
+
+# 触发方式：
+#   1. 推送 tag（v 开头）-> 构建 + 创建 Release + 挂载二进制
+#   2. 手动触发（Actions -> Release -> Run workflow）-> 填 tag 名则发布；留空则只构建
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建/发布的 tag 名（如 v1.0.0）。留空 = 只构建，不创建 Release'
+        required: false
+        default: ''
+
+# 最小权限：默认只读，写权限只在 release job 上开
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24'
+  PKG_VERSION: '6.22.0'      # 固定版本，保证产物可复现
+  EXPECTED_ROUTES: '34'      # qishui-api 的路由模块数，编译期与运行期都必须匹配
+
+jobs:
+  # ------------------------------------------------------------------
+  # 构建：Linux / Windows 各用原生 runner（宿主架构 == 目标架构）
+  # 原生构建很关键：pkg 的 V8 字节码 fabricator 需要在构建时执行目标架构的代码，
+  # 交叉构建需要 QEMU/Wine。原生 runner 直接绕开这个限制。
+  # ------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.out }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: node24-linux-x64
+            out: qishui_api_linux
+            artifact: qishui-linux
+          - os: windows-latest
+            target: node24-win-x64
+            out: qishui_api_win.exe
+            artifact: qishui-win
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # @yao-pkg/pkg 的 engines 要求宿主 Node >= 22；runner 预装的是 Node 20，必须显式升级
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 离线单元测试（test/smoke.test.js 全部 stub 掉 global.fetch，不依赖外网）
+      - name: Run tests
+        run: npm test
+
+      - name: Install pkg
+        run: npm install -g @yao-pkg/pkg@${{ env.PKG_VERSION }}
+
+      # 缓存 pkg-fetch 下载的基础运行时二进制，避免每次构建都重新下载
+      - name: Cache pkg-fetch binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.pkg-cache
+          key: pkg-cache-${{ env.PKG_VERSION }}-${{ matrix.target }}
+
+      - name: Build binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          pkg . \
+            --config .github/qishui-pkg.config.json \
+            -t "${{ matrix.target }}" \
+            -o "dist/${{ matrix.out }}" \
+            --debug 2>&1 | tee pkg-build.log
+
+          test -f "dist/${{ matrix.out }}" || { echo "::error::构建产物 dist/${{ matrix.out }} 缺失"; exit 1; }
+          ls -lh dist
+
+          # 构建期自查：module/ 目录必须被收进 snapshot，否则运行期 34 个端点全部不注册
+          if grep -q "module/" pkg-build.log; then
+            echo "OK: 构建日志中已出现 module/ 收录记录"
+          else
+            echo "::warning::构建日志未出现 module/ 收录记录，请检查配置是否生效"
+          fi
+
+      # ---- 冒烟验收：直接跑二进制，用路由数作为唯一有效判据 ----
+      # 注意：/health 是独立注册的，模块扫描失败它照样返回 ok，只探 /health 等于没测。
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        working-directory: dist
+        shell: bash
+        run: |
+          chmod +x qishui_api_linux
+          PORT=3300 HOST=127.0.0.1 ./qishui_api_linux > server.log 2>&1 &
+          BIN_PID=$!
+          trap 'kill $BIN_PID 2>/dev/null || true; echo "----- server.log -----"; cat server.log' EXIT
+
+          READY=""
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:3300/health >/dev/null 2>&1; then READY=1; break; fi
+            sleep 0.5
+          done
+          if [ -z "$READY" ]; then
+            echo "::error::二进制在 20s 内未就绪"
+            exit 1
+          fi
+
+          node -e "fetch('http://127.0.0.1:3300/api/list').then(r=>r.json()).then(j=>{const n=j.data.length;console.log('routes =',n);if(n!==${{ env.EXPECTED_ROUTES }}){console.error('::error::路由数不符，期望 ${{ env.EXPECTED_ROUTES }}');process.exit(1)}}).catch(e=>{console.error('::error::'+e.message);process.exit(1)})"
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        working-directory: dist
+        shell: pwsh
+        run: |
+          # 关闭 stop 模式，避免原生进程写 stderr 时被误判为失败；失败改由 $LASTEXITCODE 显式判断
+          $ErrorActionPreference = 'Continue'
+          $env:PORT = '3300'
+          $env:HOST = '127.0.0.1'
+
+          $proc = Start-Process -FilePath '.\qishui_api_win.exe' -PassThru `
+                    -RedirectStandardOutput 'server.log' -RedirectStandardError 'server.err'
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              try {
+                Invoke-RestMethod -Uri 'http://127.0.0.1:3300/health' -TimeoutSec 2 | Out-Null
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Milliseconds 500
+              }
+            }
+            if (-not $ready) {
+              Write-Host '::error::二进制在 20s 内未就绪'
+              Get-Content server.log, server.err -ErrorAction SilentlyContinue
+              exit 1
+            }
+
+            node -e "fetch('http://127.0.0.1:3300/api/list').then(r=>r.json()).then(j=>{const n=j.data.length;console.log('routes =',n);if(n!==${{ env.EXPECTED_ROUTES }}){console.error('路由数不符，期望 ${{ env.EXPECTED_ROUTES }}');process.exit(1)}}).catch(e=>{console.error(e.message);process.exit(1)})"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::路由数断言失败"
+              exit 1
+            }
+          } finally {
+            if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+            Write-Host '----- server.log -----'
+            Get-Content server.log, server.err -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.out }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.artifact }}
+          path: pkg-build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ------------------------------------------------------------------
+  # 发布：单点创建 Release，避免两个构建 job 并发创建产生竞态
+  # ------------------------------------------------------------------
+  release:
+    name: Create Release
+    needs: build
+    if: github.ref_type == 'tag' || inputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # 按名精确下载，只取两个二进制，避免把 build-log-* 也拉进 dist/
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: qishui-linux
+          path: dist
+
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: qishui-win
+          path: dist
+
+      - name: Verify raw binaries
+        run: |
+          ls -lh dist
+          test -f dist/qishui_api_linux   || { echo "::error::缺少 qishui_api_linux"; exit 1; }
+          test -f dist/qishui_api_win.exe || { echo "::error::缺少 qishui_api_win.exe"; exit 1; }
+
+      # 打成 zip 并保留执行位。
+      # 注意：不能用 Windows 的 Compress-Archive —— 它不写 Unix 权限位，解压后是 0644。
+      # 这里用 Python zipfile 显式写入 external_attr 高 16 位（Unix mode = 0755），
+      # create_system=3 声明来源为 Unix，Linux 的 unzip 会据此还原执行位。
+      - name: Package into zip (preserve exec bit)
+        working-directory: dist
+        run: |
+          chmod 755 qishui_api_linux qishui_api_win.exe
+          python3 - <<'PY'
+          import os
+          import zipfile
+
+          MODE = 0o755
+          PAIRS = (
+              ("qishui_api_linux",   "qishui_api_linux.zip"),
+              ("qishui_api_win.exe", "qishui_api_win.zip"),
+          )
+          for src, out in PAIRS:
+              os.chmod(src, MODE)
+              info = zipfile.ZipInfo(src)
+              info.create_system = 3              # 3 = Unix
+              info.external_attr = MODE << 16     # 高 16 位存 Unix mode
+              info.compress_type = zipfile.ZIP_DEFLATED
+              with open(src, "rb") as fh:
+                  payload = fh.read()
+              with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+                  zf.writestr(info, payload)
+              print("%-20s -> %-24s %d bytes (mode %s)" % (src, out, os.path.getsize(out), oct(MODE)))
+          PY
+
+      # 回读校验：确认 zip 里记录的确实是 0755，而不是靠假设
+      - name: Verify exec bit inside zip
+        working-directory: dist
+        run: |
+          python3 - <<'PY'
+          import zipfile
+
+          for path in ("qishui_api_linux.zip", "qishui_api_win.zip"):
+              with zipfile.ZipFile(path) as zf:
+                  for info in zf.infolist():
+                      mode = info.external_attr >> 16
+                      print("%-24s contains %-20s mode=%s" % (path, info.filename, oct(mode)))
+                      assert mode & 0o111, "%s: %s 未保留执行位" % (path, info.filename)
+          print("OK: 两个 zip 内均保留了执行位")
+          PY
+
+      # 端到端回归：在真正的 Linux 上用 unzip 解一次，确认解出来的文件带执行位
+      # （Info-ZIP 的 unzip 会依据 external_attr + create_system=3 还原 Unix 权限）
+      - name: Round-trip check with unzip
+        run: |
+          RT="$RUNNER_TEMP/roundtrip"
+          mkdir -p "$RT"
+          cd "$RT"
+          unzip -o "$GITHUB_WORKSPACE/dist/qishui_api_linux.zip"
+          ls -l qishui_api_linux
+          test -x qishui_api_linux || { echo "::error::unzip 解压后丢失执行位"; exit 1; }
+          # 注意：不要在这里执行它 —— 该二进制会直接启动 HTTP 服务并阻塞
+          test -s qishui_api_linux || { echo "::error::解压出的文件为空"; exit 1; }
+          echo "OK: unzip 解出的 qishui_api_linux 带可执行权限"
+
+      - name: Determine tag
+        id: meta
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          case "$TAG" in
+            *-*) echo "prerelease=true"  >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "发布 tag: $TAG"
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/qishui_api_linux.zip
+            dist/qishui_api_win.zip
