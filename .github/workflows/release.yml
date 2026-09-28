@@ -107,7 +107,9 @@ jobs:
           fi
           echo "OK: 已确认加载 .pkgrc"
 
-          if grep -q "module/" pkg-build.log; then
+          # 兼容两种路径分隔符：Linux 日志是 module/xxx，Windows 是 module\xxx。
+          # 不能用裸 "module" —— 会误命中 node_modules\ 路径造成假阳性。
+          if grep -qE 'module[/\\]' pkg-build.log; then
             echo "OK: 构建日志中已出现 module/ 收录记录"
           else
             echo "::warning::构建日志未出现 module/ 收录记录，请核对配置"

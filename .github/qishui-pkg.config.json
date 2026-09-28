@@ -1,7 +1,6 @@
 {
   "scripts": "module/*.js",
   "assets": ["module", "module/**/*"],
-  "bytecode": false,
   "compress": "Brotli",
   "ignore": ["test/**/*", "docs/**/*", "openapi.json"]
 }
