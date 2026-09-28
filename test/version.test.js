@@ -17,6 +17,12 @@ test('getVersion matches version.txt content in project root', () => {
   assert.strictEqual(getVersion(), fileVersion)
 })
 
+test('package.json version matches version.txt (single source of truth)', () => {
+  const fileVersion = fs.readFileSync(path.join(__dirname, '..', 'version.txt'), 'utf8').trim()
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'))
+  assert.strictEqual(pkg.version, fileVersion)
+})
+
 test('getVersion result is cached and stable', () => {
   assert.strictEqual(getVersion(), getVersion())
 })

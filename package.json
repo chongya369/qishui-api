@@ -8,6 +8,8 @@
     "dev": "node --watch app.js",
     "start": "node app.js",
     "test": "node --test test/*.test.js",
+    "pretest": "node scripts/sync-version.js",
+    "sync-version": "node scripts/sync-version.js",
     "smoke:live": "node test/live-smoke.js"
   },
   "keywords": [
