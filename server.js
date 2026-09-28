@@ -7,6 +7,7 @@ const { QishuiClient } = require('./src/qishuiClient')
 const { HttpError, ValidationError } = require('./src/errors')
 const { ok, fail } = require('./src/response')
 const { sanitizeForExternal } = require('./src/redaction')
+const { getVersion } = require('./src/version')
 
 async function getModuleDefinitions(modulesPath) {
   const files = await fs.promises.readdir(modulesPath)
@@ -74,7 +75,7 @@ async function constructServer() {
   app.get('/', (req, res) => {
     res.json(ok({
       name: 'qishui-api',
-      version: require('./package.json').version,
+      version: getVersion(),
       routes: moduleDefs.map((item) => item.route),
     }, req.traceId))
   })
@@ -133,6 +134,10 @@ async function serveQishuiApi(options = {}) {
     const server = app.listen(port, host, () => {
       console.log(`qishui-api listening on http://${host}:${port}`)
       resolve(server)
+    })
+    server.on('error', (error) => {
+      console.error(`qishui-api 启动失败: ${error.message}`)
+      process.exit(1)
     })
   })
 }

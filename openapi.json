@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "qishui-api",
-    "version": "1.0.0",
+    "version": "0.1.1",
     "description": "汽水音乐 API 服务"
   },
   "servers": [

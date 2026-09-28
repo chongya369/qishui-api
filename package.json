@@ -1,6 +1,6 @@
 {
   "name": "qishui-api",
-  "version": "1.0.0",
+  "version": "0.1.1",
   "description": "汽水音乐 Node.js API 服务，整合静态逆向、分享页解析和已验证可用的 Luna 接口。",
   "main": "app.js",
   "bin": "./app.js",
